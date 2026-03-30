@@ -1,0 +1,92 @@
+# Hall of Automata — Agent Registry
+#
+# This is the live catalog. Old Major reads from and writes to this file directly.
+# On automaton onboarding, Old Major adds the new agent entry here and commits
+# roster/<slug>.md in the same push — no external store, no deployment payload.
+#
+# To add a new automaton: open the onboarding issue template.
+#
+# Token model: CLAUDE_CODE_OAUTH_TOKEN lives in invoker/<handle>
+# environments. Automata do not hold their own tokens — they run
+# under a pool-selected invoker's credential.
+
+meta:
+  onboarding_template: .github/ISSUE_TEMPLATE/new-automaton.yml
+
+agents:
+
+  old-major:
+    display_name: "Old Major 🏛️"
+    # Persona: roster/old-major.md
+    # Token:  pool-selected invoker/<handle> at dispatch time.
+    author: mksetaro
+    teams: [automata-invokers]
+    max_turns: 100
+    max_retries: 1                    # Triage agent. Routes correctly or asks — no retry loop.
+    catalog:
+      roles: [triage, route, onboard, synthesize]
+      domains: [roster-management, task-triage, resource-stewardship, context-synthesis, onboarding, invoker-management, automata-management]
+      scope_summary: >
+        Entry point for all unlabeled invocations. Reads the roster catalog, picks the right
+        specialist, synthesizes task context. Does not implement code or open PRs.
+
+  hamlet:
+    display_name: "Hamlet 🐗"
+    # Persona: roster/hamlet.md
+    # Token:  pool-selected invoker/<handle> at dispatch time.
+    invoker: mksetaro
+    teams: [automata-invokers]
+    max_turns: 40
+    max_retries: 2
+    catalog:
+      roles: [implement, debug, triage]
+      domains: [cpp, build-systems, debugging]
+      scope_summary: >
+        C++17 high-performance specialist — implements features, fixes bugs, and investigates
+        runtime misbehaviours in Bazel-managed codebases, working from CI output rather than
+        running builds inline.
+
+  pyrate:
+    display_name: "Captain Pyrate 🦜"
+    # Persona: roster/pyrate.md
+    # Token:  pool-selected invoker/<handle> at dispatch time.
+    author: fpetracci
+    teams: [automata-invokers]
+    max_turns: 40
+    max_retries: 2
+    catalog:
+      roles: [implement, debug]
+      domains: [python]
+      scope_summary: >
+        Python software engineering specialist — implements features, fixes bugs, and handles
+        packaging and deployment in Bazel-managed and uv-managed Python codebases.
+
+  mergio:
+    display_name: "mergio 🤘"
+    # Persona: roster/mergio.md
+    # Token:  pool-selected invoker/<handle> at dispatch time.
+    invoker: mksetaro
+    teams: [automata-invokers]
+    max_turns: 40
+    max_retries: 2
+    catalog:
+      roles: [implement, debug, triage]
+      domains: [ci-cd, git-ops, build-systems, infrastructure, deployment, pipeline-triage]
+      scope_summary: >
+        CI/CD architect and pipeline enforcer — designs, fixes, and optimizes GitHub Actions
+        workflows, build systems, and deployment pipelines with zero tolerance for broken gates.
+
+  aeeeiii:
+    display_name: "AEEEEEIII 🐑"
+    # Persona: roster/aeeeiii.md
+    # Token:  pool-selected invoker/<handle> at dispatch time.
+    author: mksetaro
+    teams: [automata-invokers]
+    max_turns: 40
+    max_retries: 2
+    catalog:
+      roles: [research, advise, synthesize]
+      domains: [perception, environment-modeling, computer-vision, autonomous-systems, ai-research-synthesis]
+      scope_summary: >
+        Deep research and advising on AI perception, environment modeling, and computer vision —
+        literature synthesis, paper analysis, and conceptual guidance for autonomous systems work.

@@ -1,0 +1,414 @@
+name: "[Hall] Invoke Agent"
+
+on:
+  workflow_call:
+    inputs:
+      agent:
+        description: Agent identifier (e.g. hamlet)
+        required: true
+        type: string
+      repo-owner:
+        description: Target repository owner (defaults to this org)
+        required: false
+        type: string
+        default: ""
+      repo-name:
+        description: Target repository name (defaults to this repo)
+        required: false
+        type: string
+        default: ""
+      issue-number:
+        description: Issue or PR number in the target repository
+        required: false
+        type: string
+        default: ""
+  workflow_dispatch:
+    inputs:
+      agent:
+        description: Agent identifier (e.g. hamlet)
+        required: true
+        type: string
+      repo-owner:
+        description: Target repository owner (defaults to this org)
+        required: false
+        type: string
+        default: ""
+      repo-name:
+        description: Target repository name (defaults to this repo)
+        required: false
+        type: string
+        default: ""
+      issue-number:
+        description: Issue or PR number in the target repository
+        required: false
+        type: string
+        default: ""
+  issues:
+    types: [labeled]
+  issue_comment:
+    types: [created]
+  pull_request_review:
+    types: [submitted]
+
+jobs:
+  # ── Job 1: resolve invocation context ────────────────────────────────────
+  detect:
+    name: Detect invocation context
+    runs-on: ubuntu-latest
+    outputs:
+      actor:         ${{ steps.ctx.outputs.actor }}
+      agent:         ${{ steps.ctx.outputs.agent }}
+      issue-number:  ${{ steps.ctx.outputs.issue-number }}
+      invoker:       ${{ steps.ctx.outputs.invoker }}
+      invoker-count: ${{ steps.ctx.outputs.invoker-count }}
+      trigger-event: ${{ steps.ctx.outputs.trigger-event }}
+      repo-owner:    ${{ steps.ctx.outputs.repo-owner }}
+      repo-name:     ${{ steps.ctx.outputs.repo-name }}
+      pr-number:     ${{ steps.ctx.outputs.pr-number }}
+      review-body:   ${{ steps.ctx.outputs.review-body }}
+      mode:          ${{ steps.ctx.outputs.mode }}
+    steps:
+      - name: Checkout Hall repo (scripts only)
+        uses: actions/checkout@v4
+        with:
+          path: .hall
+          sparse-checkout: scripts/
+          sparse-checkout-cone-mode: true
+
+      - name: Create GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id:      ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
+      - name: Resolve invocation context
+        id: ctx
+        env:
+          INPUT_AGENT:        ${{ inputs.agent }}
+          INPUT_ISSUE_NUMBER: ${{ inputs.issue-number }}
+          INPUT_REPO_OWNER:   ${{ inputs.repo-owner }}
+          INPUT_REPO_NAME:    ${{ inputs.repo-name }}
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          script: |
+            const fn = require('./.hall/scripts/detect-invoke-context.js')
+            await fn({ github, context, core })
+
+  # ── Job 2: notify when the invoker pool is exhausted ────────────────────
+  # Detect's pool-selection already picked the best invoker (least-used, under
+  # cap). This job only runs when the pool is fully exhausted (invoker == '').
+  notify-queued:
+    name: Notify — pool exhausted
+    needs: [detect]
+    if: needs.detect.outputs.agent != '' && needs.detect.outputs.invoker == ''
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Hall repo (scripts only)
+        uses: actions/checkout@v4
+        with:
+          path: .hall
+          sparse-checkout: scripts/
+          sparse-checkout-cone-mode: true
+
+      - name: Create GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id:      ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
+      - name: Post queued comment and label
+        if: needs.detect.outputs.issue-number != ''
+        uses: actions/github-script@v7
+        env:
+          ACTION:       pool-exhausted
+          REPO_OWNER:   ${{ needs.detect.outputs.repo-owner }}
+          REPO_NAME:    ${{ needs.detect.outputs.repo-name }}
+          ISSUE_NUMBER: ${{ needs.detect.outputs.issue-number }}
+          AGENT:        ${{ needs.detect.outputs.agent }}
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          script: |
+            const fn = require('./.hall/scripts/notification.js')
+            await fn({ github, core })
+
+  # ── Job 3: dispatch the resolved agent ───────────────────────────────────
+  # Runs in invoker/<invoker> so secrets.CLAUDE_CODE_OAUTH_TOKEN injects from
+  # the pool-selected invoker's environment. Invoker is chosen by detect: the
+  # least-used registered member currently under their weekly cap.
+  dispatch:
+    name: Dispatch ${{ needs.detect.outputs.agent }}
+    needs: [detect]
+    if: needs.detect.outputs.agent != '' && needs.detect.outputs.invoker != ''
+    runs-on: ubuntu-latest
+    environment: invoker/${{ needs.detect.outputs.invoker }}
+    concurrency:
+      group: hall-${{ needs.detect.outputs.agent }}-${{ needs.detect.outputs.issue-number || github.run_id }}
+      cancel-in-progress: false
+    steps:
+      - name: Create GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ needs.detect.outputs.repo-owner }}
+
+      - name: Checkout target repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ needs.detect.outputs.repo-owner }}/${{ needs.detect.outputs.repo-name }}
+          token:      ${{ steps.app-token.outputs.token }}
+
+      - name: Checkout Hall repo
+        uses: actions/checkout@v4
+        with:
+          path: .hall
+
+      - name: Read agent config
+        id: agent-cfg
+        env:
+          AGENT: ${{ needs.detect.outputs.agent }}
+        shell: bash
+        run: bash .hall/scripts/read-agent-config.sh
+
+      # Hard fail on unauthorized — core.setFailed() in the composite action
+      # stops this job. Post-dispatch always() steps gate on steps.auth.outcome.
+      - name: Authorize invoker
+        id: auth
+        uses: ./.hall/actions/authorize
+        with:
+          org-read-token: ${{ steps.app-token.outputs.token }}
+          org:            ${{ needs.detect.outputs.repo-owner }}
+          team-slug:      ${{ steps.agent-cfg.outputs.team-slug }}
+          username:       ${{ needs.detect.outputs.actor }}
+          app-token:      ${{ steps.app-token.outputs.token }}
+          repo-owner:     ${{ needs.detect.outputs.repo-owner }}
+          repo-name:      ${{ needs.detect.outputs.repo-name }}
+          issue-number:   ${{ needs.detect.outputs.issue-number }}
+          trigger-event:  ${{ needs.detect.outputs.trigger-event }}
+          label-name:     hall:${{ needs.detect.outputs.agent }}
+          agent-name:     ${{ needs.detect.outputs.agent }}
+          bot-login:      ${{ steps.app-token.outputs.app-slug }}[bot]
+
+      - name: Update status card — dispatching
+        if: needs.detect.outputs.issue-number != ''
+        uses: ./.hall/actions/status-card
+        with:
+          app-token:     ${{ steps.app-token.outputs.token }}
+          repo-owner:    ${{ needs.detect.outputs.repo-owner }}
+          repo-name:     ${{ needs.detect.outputs.repo-name }}
+          issue-number:  ${{ needs.detect.outputs.issue-number }}
+          agent:         ${{ needs.detect.outputs.agent }}
+          stage:         ${{ needs.detect.outputs.agent == 'old-major' && 'assigning' || 'dispatching' }}
+          dispatched-at: ${{ github.event.created_at }}
+
+      - name: Increment invoker weekly counter
+        id: increment
+        uses: ./.hall/actions/counter
+        with:
+          current-count:    ${{ needs.detect.outputs.invoker-count }}
+          environment-name: invoker/${{ needs.detect.outputs.invoker }}
+          repo-owner:       ${{ github.repository_owner }}
+          repo-name:        hall-of-automata
+          app-token:        ${{ steps.app-token.outputs.token }}
+
+      - name: Remove awaiting-input label (if present)
+        if: needs.detect.outputs.issue-number != ''
+        env:
+          ACTION:       awaiting
+          MODE:         remove
+          REPO_OWNER:   ${{ needs.detect.outputs.repo-owner }}
+          REPO_NAME:    ${{ needs.detect.outputs.repo-name }}
+          ISSUE_NUMBER: ${{ needs.detect.outputs.issue-number }}
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          script: |
+            const fn = require('./.hall/scripts/label-utils.js')
+            await fn({ github, core })
+
+      - name: Manage routing label
+        if: needs.detect.outputs.issue-number != ''
+        env:
+          ACTION:       routing
+          AGENT:        ${{ needs.detect.outputs.agent }}
+          REPO_OWNER:   ${{ needs.detect.outputs.repo-owner }}
+          REPO_NAME:    ${{ needs.detect.outputs.repo-name }}
+          ISSUE_NUMBER: ${{ needs.detect.outputs.issue-number }}
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          script: |
+            const fn = require('./.hall/scripts/label-utils.js')
+            await fn({ github, core })
+
+      - name: Inject agent persona
+        env:
+          AGENT: ${{ needs.detect.outputs.agent }}
+        shell: bash
+        run: |
+          # On first dispatch to this repo (.hall-local.md absent): if the repo has its own
+          # CLAUDE.md, stash it as .hall-original-claude.md so the agent can read it during
+          # this run and synthesize its constraints into .hall-local.md.
+          # .hall-original-claude.md is ephemeral — never committed. On all subsequent
+          # dispatches .hall-local.md already exists, stashing is skipped, and the agent
+          # reads the accumulated Hall memory directly.
+          if [ -f "CLAUDE.md" ] && [ ! -f ".hall-local.md" ]; then
+            cp CLAUDE.md .hall-original-claude.md
+          fi
+          cat ".hall/agents/automaton_base.md" ".hall/roster/${AGENT}.md" > CLAUDE.md
+
+      #[lore-keeper]: related to above, restore memory success failure could function as decisional gate for initial claude.tmp.md creation
+      - name: Restore task memory (review re-dispatch)
+        id: memory
+        if: needs.detect.outputs.trigger-event == 'pr_review'
+        uses: ./.hall/actions/memory
+        with:
+          mode:      restore
+          repo:      ${{ needs.detect.outputs.repo-owner }}/${{ needs.detect.outputs.repo-name }}
+          pr-number: ${{ needs.detect.outputs.pr-number }}
+
+      #[lore-keeper]: see above
+      - name: Append review context to CLAUDE.md
+        if: needs.detect.outputs.trigger-event == 'pr_review'
+        env:
+          MODE:        review
+          PR_NUMBER:   ${{ needs.detect.outputs.pr-number }}
+          REVIEW_BODY: ${{ needs.detect.outputs.review-body }}
+        shell: bash
+        run: bash .hall/scripts/context-injection.sh
+
+      #[lore-keeper]: when feeding the informations to the agent we should also ask him to synthetise the context
+      #we can list the important things to keep and let it consolidate it's knowledge
+      #this implies refactoring of Persona.md and creation of guidelines so we can be clear and analytical and easy to digest for a model
+      - name: Run agent
+        id: agent
+        uses: ./.hall/actions/dispatch
+        with:
+          oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          app-token:   ${{ steps.app-token.outputs.token }}
+          max-turns:   ${{ steps.agent-cfg.outputs.max-turns }}
+          prompt: >-
+            You have been dispatched to work on issue #${{ needs.detect.outputs.issue-number }}
+            in ${{ needs.detect.outputs.repo-owner }}/${{ needs.detect.outputs.repo-name }}.
+            Your persona is in CLAUDE.md. For a review re-dispatch the review feedback is also
+            appended there. Read the issue, follow your persona, and begin working.
+
+      # ── Post-dispatch: find PR, save memory, update status card ───────────
+      # always() so these run even if the agent step fails — status card must
+      # reflect actual outcome. steps.auth.outcome == 'success' excludes the
+      # unauthorized path (job hard-stopped by authorize action).
+
+      - name: Find PR opened by agent
+        id: find-pr
+        if: always() && steps.auth.outcome == 'success' && needs.detect.outputs.trigger-event != 'pr_review'
+        env:
+          ACTION:       find
+          AGENT:        ${{ needs.detect.outputs.agent }}
+          REPO_OWNER:   ${{ needs.detect.outputs.repo-owner }}
+          REPO_NAME:    ${{ needs.detect.outputs.repo-name }}
+          ISSUE_NUMBER: ${{ needs.detect.outputs.issue-number }}
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          script: |
+            const fn = require('./.hall/scripts/pr-utils.js')
+            await fn({ github, core })
+
+      - name: Save task memory
+        if: always() && steps.auth.outcome == 'success' && (steps.find-pr.outputs.pr-number != '' || needs.detect.outputs.issue-number != '')
+        uses: ./.hall/actions/memory
+        with:
+          mode:         save
+          repo:         ${{ needs.detect.outputs.repo-owner }}/${{ needs.detect.outputs.repo-name }}
+          pr-number:    ${{ steps.find-pr.outputs.pr-number }}
+          issue-number: ${{ needs.detect.outputs.issue-number }}
+          memory-json: |-
+            %hall-task v1 | ${{ needs.detect.outputs.repo-owner }}/${{ needs.detect.outputs.repo-name }}
+            !agent ${{ needs.detect.outputs.agent }}
+            !issue ${{ needs.detect.outputs.issue-number || '-' }}
+            !pr ${{ steps.find-pr.outputs.pr-number || '-' }}
+            !branch ${{ steps.find-pr.outputs.branch || '-' }}
+            !retry 0
+            !ci -
+            !review -
+
+      - name: Resolve final stage
+        id: final
+        if: always() && steps.auth.outcome == 'success'
+        env:
+          TRIGGER:       ${{ needs.detect.outputs.trigger-event }}
+          FIND_PR:       ${{ steps.find-pr.outputs.pr-number }}
+          DETECT_PR:     ${{ needs.detect.outputs.pr-number }}
+          BRANCH:        ${{ steps.find-pr.outputs.branch }}
+          AGENT_OUTCOME: ${{ steps.find-pr.outputs.outcome }}
+          MODE:          ${{ needs.detect.outputs.mode }}
+        shell: bash
+        run: bash .hall/scripts/resolve-final-stage.sh
+
+      - name: Update status card
+        if: always() && steps.auth.outcome == 'success' && needs.detect.outputs.issue-number != ''
+        uses: ./.hall/actions/status-card
+        with:
+          app-token:    ${{ steps.app-token.outputs.token }}
+          repo-owner:   ${{ needs.detect.outputs.repo-owner }}
+          repo-name:    ${{ needs.detect.outputs.repo-name }}
+          issue-number: ${{ needs.detect.outputs.issue-number }}
+          agent:        ${{ needs.detect.outputs.agent }}
+          stage:        ${{ steps.final.outputs.stage }}
+          pr-number:    ${{ steps.final.outputs.pr-number }}
+          branch:       ${{ steps.final.outputs.branch }}
+
+      - name: Apply awaiting-input label
+        if: always() && steps.auth.outcome == 'success' && steps.final.outputs.stage == 'awaiting-input' && needs.detect.outputs.issue-number != ''
+        env:
+          ACTION:       awaiting
+          MODE:         apply
+          REPO_OWNER:   ${{ needs.detect.outputs.repo-owner }}
+          REPO_NAME:    ${{ needs.detect.outputs.repo-name }}
+          ISSUE_NUMBER: ${{ needs.detect.outputs.issue-number }}
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          script: |
+            const fn = require('./.hall/scripts/label-utils.js')
+            await fn({ github, core })
+
+      - name: Post quota-queued comment and label
+        if: always() && steps.auth.outcome == 'success' && steps.final.outputs.stage == 'queued' && needs.detect.outputs.issue-number != ''
+        env:
+          ACTION:       quota-queued
+          REPO_OWNER:   ${{ needs.detect.outputs.repo-owner }}
+          REPO_NAME:    ${{ needs.detect.outputs.repo-name }}
+          ISSUE_NUMBER: ${{ needs.detect.outputs.issue-number }}
+          AGENT:        ${{ needs.detect.outputs.agent }}
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          script: |
+            const fn = require('./.hall/scripts/notification.js')
+            await fn({ github, core })
+
+      - name: Post-dispatch audit
+        if: always() && steps.auth.outcome == 'success'
+        uses: ./.hall/actions/post-dispatch
+        with:
+          app-token:          ${{ steps.app-token.outputs.token }}
+          agent:              ${{ needs.detect.outputs.agent }}
+          agent-dispatched:   ${{ needs.detect.outputs.agent }}
+          repo-owner:         ${{ needs.detect.outputs.repo-owner }}
+          repo-name:          ${{ needs.detect.outputs.repo-name }}
+          issue-number:       ${{ needs.detect.outputs.issue-number }}
+          pr-number:          ${{ steps.final.outputs.pr-number }}
+          invoker:            ${{ needs.detect.outputs.invoker }}
+          team-validated:     ${{ steps.agent-cfg.outputs.team-slug }}
+          turns-used:         ${{ steps.agent.outputs.turns-used }}
+          turns-max:          ${{ steps.agent-cfg.outputs.max-turns }}
+          outcome:            ${{ steps.final.outputs.stage }}
+          weekly-count-after: ${{ steps.increment.outputs.count }}
+
+
+#[lore-keeper]: reading the file is overwhealming, each job should be defined in its own action file

@@ -1,0 +1,69 @@
+name: "[Hall] Sync from Operator"
+
+on:
+  repository_dispatch:
+    types: [hall.sync]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to sync (e.g. v1.2.0)'
+        required: false
+        default: 'manual'
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    name: Sync ${{ github.event.client_payload.version || inputs.version }}
+    runs-on: ubuntu-latest
+    # Never run on the operator org — it is the source, not a target
+    if: github.repository_owner != 'MockaSort-Studio'
+    steps:
+      - name: Generate app token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id:     ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Configure git
+        run: |
+          git config user.name  "hall-of-automata[bot]"
+          git config user.email "hall-of-automata[bot]@users.noreply.github.com"
+
+      - name: Fetch operator repo
+        run: |
+          git remote add upstream https://github.com/MockaSort-Studio/hall-of-automata.git
+          git fetch upstream main --no-tags --depth=1
+
+      - name: Apply operator-managed paths
+        run: |
+          # Wipe synced directories so deletions propagate, then re-apply from upstream.
+          # Never touches org-specific files:
+          #   agents.yml, routing.yml, roster/<custom>.md, .hall-local.md, CLAUDE.md
+          git rm -r --ignore-unmatch \
+            .github/workflows/ \
+            actions/ \
+            scripts/
+          git checkout upstream/main -- \
+            .github/workflows/ \
+            actions/ \
+            scripts/ \
+            agents/automaton_base.md \
+            roster/old-major.md \
+            roster/mergio.md
+
+      - name: Push if changed
+        run: |
+          if git diff --cached --quiet; then
+            echo "Already up to date with ${{ github.event.client_payload.version || inputs.version }}"
+            exit 0
+          fi
+          git commit -m "chore(sync): Hall ${{ github.event.client_payload.version || inputs.version }}"
+          git push origin main

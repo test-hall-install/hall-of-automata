@@ -1,0 +1,100 @@
+name: "🤖 New Automaton"
+description: "Register a new specialist. Fill out the character sheet — this becomes the basis of the persona gist."
+title: "[Automaton]: <slug>"
+labels: ["hall:onboard-automaton"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Fill out all three sections. An org admin will provision the environment; you handle the gist.
+        See [`agents/automaton_template.md`](../../agents/automaton_template.md) for guidance on each section.
+
+  - type: input
+    id: slug
+    attributes:
+      label: "Slug"
+      description: "Lowercase, no spaces. This becomes `hall/<slug>` environment and `hall:<slug>` label."
+      placeholder: "ophelia"
+    validations:
+      required: true
+
+  - type: input
+    id: display_name
+    attributes:
+      label: "Display name"
+      description: "Human-readable. Shown in status cards and comments."
+      placeholder: "Ophelia"
+    validations:
+      required: true
+
+  - type: textarea
+    id: character
+    attributes:
+      label: "Character"
+      description: |
+        Tone adjectives, voice notes, automaton-specific rules, and signature.
+        Keep it dense — LLM reads this as a behavioral contract, not a description.
+      placeholder: |
+        Tone: precise, terse, no hedging
+        Voice: second person imperative
+        Rules:
+        - Never modify public API without explicit sign-off
+        - Co-author all commits as Ophelia <ophelia@hall-of-automata>
+        Signature: — Ophelia
+    validations:
+      required: true
+
+  - type: textarea
+    id: domains
+    attributes:
+      label: "Domains"
+      description: |
+        Named capability bundles. Use recognized technology/domain names — the name implies affordances.
+        Do NOT enumerate tools. Domains are routing signals, not tool lists.
+      placeholder: |
+        - python: data pipelines, pandas, pytest, type-annotated APIs
+        - devops: GitHub Actions, Docker, VPS deployment
+        - code-review: architectural critique, security patterns
+    validations:
+      required: true
+
+  - type: textarea
+    id: scope
+    attributes:
+      label: "Scope"
+      description: |
+        Three subsections: right-call-for, not-right-call-for, ambiguity gate.
+        The ambiguity gate is what the automaton does when a request falls in a grey zone.
+      placeholder: |
+        Right call for:
+        - Python data pipeline work in MockaSort-Studio repos
+        - CI/CD configuration and deployment scripts
+
+        Not right call for:
+        - C++ or systems-level work (use Hamlet)
+        - Anything requiring production database access
+
+        Ambiguity gate:
+        Post a scoping question before acting. State what you can do and what falls outside scope.
+    validations:
+      required: true
+
+  - type: textarea
+    id: scope_summary
+    attributes:
+      label: "Scope summary (one sentence)"
+      description: "Old Major reads this when picking between agents. Make it decision-useful."
+      placeholder: "Python data engineering and DevOps specialist for MockaSort pipelines."
+    validations:
+      required: true
+
+  - type: input
+    id: max_turns
+    attributes:
+      label: "Max turns (optional)"
+      description: |
+        Maximum agentic turns per dispatch. Leave blank to use the default (30).
+        Use fewer turns for narrow, well-scoped agents. Use more for agents that do deep multi-file work.
+      placeholder: "30"
+    validations:
+      required: false
