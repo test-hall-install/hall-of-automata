@@ -46,27 +46,42 @@ module.exports = async ({ github, context, core }) => {
     'hall:active-invoker',
   ];
 
-  if (event === 'issues' && payload.action === 'labeled') {
+  if ((event === 'issues' || event === 'pull_request') && payload.action === 'labeled') {
     const label = payload.label?.name || '';
     if (!label.startsWith('hall:')) { core.setOutput('agent', ''); return; }
+    // Onboarding labels: route via invoke.yml → workflow_call instead of direct trigger
+    if (label === 'hall:onboard-automaton' || label === 'hall:onboard-invoker') {
+      const thread = payload.issue || payload.pull_request;
+      core.setOutput('onboarding-type', label === 'hall:onboard-automaton' ? 'automaton' : 'invoker');
+      core.setOutput('issue-number',    String(thread.number));
+      core.setOutput('issue-body',      thread.body || '');
+      core.setOutput('issue-login',     thread.user?.login || '');
+      core.setOutput('repo-owner',      repoOwner);
+      core.setOutput('repo-name',       repoName);
+      core.setOutput('agent',           '');
+      return;
+    }
     // Ignore system labels — they are applied by the Hall itself, not invokers
     if (SYSTEM_LABELS.includes(label)) { core.setOutput('agent', ''); return; }
-    // hall:dispatch-automaton and hall:post-mortem both route to Old Major
-    if (label === 'hall:dispatch-automaton' || label === 'hall:post-mortem') {
+    // hall:dispatch-automaton routes to Old Major; other pseudo-agent aliases
+    // are resolved by the unified AGENT_ALIASES map below (e.g. hall:post-mortem).
+    if (label === 'hall:dispatch-automaton') {
       agent = 'old-major';
     } else {
       agent = label.replace('hall:', '');
     }
-    issueNumber  = String(payload.issue.number);
+    // pull_request events use payload.pull_request; issues events use payload.issue
+    const thread = payload.issue || payload.pull_request;
+    issueNumber  = String(thread.number);
     // If the label was applied by the Hall bot (e.g. Old Major delegating to an agent),
-    // inherit the issue author so the original invoker's authz carries through.
+    // inherit the thread author so the original invoker's authz carries through.
     actor        = payload.sender?.type === 'Bot'
-                     ? (payload.issue?.user?.login || context.actor)
+                     ? (thread?.user?.login || context.actor)
                      : payload.sender.login;
     triggerEvent = 'issue_labeled';
-    // Extract target repo from issue body when not provided via workflow inputs.
+    // Extract target repo from thread body when not provided via workflow inputs.
     if (!process.env.INPUT_REPO_OWNER && !process.env.INPUT_REPO_NAME) {
-      const parsed = parseTargetRepo(payload.issue?.body);
+      const parsed = parseTargetRepo(thread?.body);
       if (parsed) { repoOwner = parsed.owner; repoName = parsed.name; }
     }
 
@@ -85,6 +100,31 @@ module.exports = async ({ github, context, core }) => {
     core.info(`[detect] labels=${JSON.stringify(labels.map(l => l.name))}`);
     const hallLabel  = labels.find(l => l.name.startsWith('hall:') && !SYSTEM_LABELS.includes(l.name));
     core.info(`[detect] hallLabel=${hallLabel?.name}`);
+    // Onboarding Phase 2: comment on an onboarding issue routes back through invoke.yml.
+    // ISSUE_LABELS_JSON is injected by the invoke.yml detect step for issue_comment events.
+    const issueLabels = JSON.parse(process.env.ISSUE_LABELS_JSON || '[]');
+    if (issueLabels.includes('hall:onboard-automaton')) {
+      core.setOutput('agent',           '');
+      core.setOutput('onboarding-type', 'automaton');
+      core.setOutput('issue-number',    String(payload.issue.number));
+      core.setOutput('issue-login',     payload.issue?.user?.login || '');
+      core.setOutput('repo-owner',      repoOwner);
+      core.setOutput('repo-name',       repoName);
+      core.setOutput('awaiting-input',  issueLabels.includes('hall:awaiting-input') ? 'true' : 'false');
+      return;
+    }
+    if (issueLabels.includes('hall:onboard-invoker')) {
+      core.setOutput('agent',           '');
+      core.setOutput('onboarding-type', 'invoker');
+      core.setOutput('issue-number',    String(payload.issue.number));
+      core.setOutput('issue-body',      payload.issue?.body || '');
+      core.setOutput('issue-login',     payload.issue?.user?.login || '');
+      core.setOutput('repo-owner',      repoOwner);
+      core.setOutput('repo-name',       repoName);
+      core.setOutput('comment-body',    payload.comment?.body || '');
+      core.setOutput('awaiting-input',  'true');
+      return;
+    }
     if (!hallLabel)  { core.setOutput('agent', ''); return; }
     agent = hallLabel.name === 'hall:dispatch-automaton' ? 'old-major' : hallLabel.name.replace('hall:', '');
     issueNumber  = String(payload.issue.number);
@@ -97,22 +137,14 @@ module.exports = async ({ github, context, core }) => {
     }
 
   } else if (event === 'pull_request_review') {
-    const body    = payload.review?.body || '';
-    const mention = body.match(/@hall-of-automata(?:\[bot\])?/i);
-    // @mention is required — prevents any reviewer on an agent-owned PR from accidentally
-    // triggering dispatch. If @mention present but no agent name, fall back to PR label.
-    if (!mention) { core.setOutput('agent', ''); return; }
-    // Prefer the bound hall:<agent> label — it is the canonical system signal.
-    // Only fall back to parsing the review body when no label is bound (e.g. an
-    // unowned PR where the reviewer is explicitly naming an agent).
-    // This prevents natural language after @hall-of-automata (e.g. "address the
-    // review comment") from being misread as an agent slug.
+    const body     = payload.review?.body || '';
     const prLabels = (payload.pull_request?.labels || []).map(l => l.name);
     const bound    = prLabels.find(l => l.startsWith('hall:') && !SYSTEM_LABELS.includes(l));
     if (bound) {
+      // Bound hall:<agent> label — dispatch on any review submission, no @-mention needed.
       agent = bound.replace('hall:', '');
     } else {
-      // No bound label — try to parse a slug from the mention.
+      // No bound label — require @-mention with explicit agent slug.
       // Require lowercase-kebab-case to reject natural language words.
       const nameMatch = body.match(/@hall-of-automata(?:\[bot\])?\s+(?:agent:\s*)?([a-z][a-z0-9-]*)/);
       if (!nameMatch) { core.setOutput('agent', ''); return; }
@@ -132,6 +164,12 @@ module.exports = async ({ github, context, core }) => {
     core.setOutput('agent', '');
     return;
   }
+
+  // ── Normalize pseudo-agent aliases to canonical handlers ─────────────────
+  // Applied after all event-parsing branches so every trigger path is covered.
+  const AGENT_ALIASES = { 'post-mortem': 'old-major' };
+  let triggerReason = '';
+  if (AGENT_ALIASES[agent]) { triggerReason = agent; agent = AGENT_ALIASES[agent]; }
 
   // ── Pool-select the least-used invoker under cap ──────────────────────────
   // Query all invoker/* environments in the Hall repo, read usage vars via
@@ -227,13 +265,15 @@ module.exports = async ({ github, context, core }) => {
     else mode = 'doing';
   }
 
-  core.setOutput('actor',         actor);
-  core.setOutput('agent',         agent);
-  core.setOutput('issue-number',  issueNumber);
-  core.setOutput('invoker',       invoker);
-  core.setOutput('invoker-count', String(invokerCount));
-  core.setOutput('trigger-event', triggerEvent);
-  core.setOutput('repo-owner',    repoOwner);
-  core.setOutput('repo-name',     repoName);
-  core.setOutput('mode',          mode);
+  core.setOutput('actor',           actor);
+  core.setOutput('agent',           agent);
+  core.setOutput('issue-number',    issueNumber);
+  core.setOutput('invoker',         invoker);
+  core.setOutput('invoker-count',   String(invokerCount));
+  core.setOutput('trigger-event',   triggerEvent);
+  core.setOutput('repo-owner',      repoOwner);
+  core.setOutput('repo-name',       repoName);
+  core.setOutput('mode',            mode);
+  core.setOutput('trigger-reason',  triggerReason);
+  core.setOutput('onboarding-type', '');
 };
