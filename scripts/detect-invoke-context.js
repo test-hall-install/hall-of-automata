@@ -86,6 +86,9 @@ module.exports = async ({ github, context, core }) => {
     }
 
   } else if (event === 'issue_comment') {
+    // Skip comments on PR threads — only issue comments should re-dispatch agents
+    if (payload.issue?.pull_request) { core.setOutput('agent', ''); return; }
+
     // Never process bot comments — prevents rejection comment feedback loops
     const senderType = payload.sender?.type || '';
     core.info(`[detect] event=issue_comment sender=${payload.sender?.login} senderType=${senderType}`);
@@ -137,6 +140,10 @@ module.exports = async ({ github, context, core }) => {
     }
 
   } else if (event === 'pull_request_review') {
+    // Only CHANGES_REQUESTED warrants a re-dispatch; skip APPROVED and COMMENTED
+    const state = (payload.review?.state || '').toUpperCase();
+    if (state !== 'CHANGES_REQUESTED') { core.setOutput('agent', ''); return; }
+
     const body     = payload.review?.body || '';
     const prLabels = (payload.pull_request?.labels || []).map(l => l.name);
     const bound    = prLabels.find(l => l.startsWith('hall:') && !SYSTEM_LABELS.includes(l));
@@ -205,13 +212,12 @@ module.exports = async ({ github, context, core }) => {
       const res = await github.request('GET /repos/{owner}/{repo}/environments', {
         owner: hallOwner, repo: hallRepo, per_page: 100, page
       });
-      // TODO: remove keeper/ filter once all keeper/* envs are migrated to invoker/*
-      const batch = (res.data.environments || []).filter(e => e.name.startsWith('invoker/') || e.name.startsWith('keeper/'));
+      const batch = (res.data.environments || []).filter(e => e.name.startsWith('invoker/'));
       envs = envs.concat(batch);
       if ((res.data.environments || []).length < 100) break;
       page++;
     }
-    core.info(`[detect] found ${envs.length} invoker/keeper environment(s) (keeper/* is legacy, pending migration to invoker/*)`);
+    core.info(`[detect] found ${envs.length} invoker/* environment(s)`);
 
     const candidates = [];
     for (const env of envs) {
@@ -233,8 +239,7 @@ module.exports = async ({ github, context, core }) => {
       } catch (_) { /* not set yet — default 25 */ }
       core.info(`[detect] ${env.name}: count=${count} cap=${cap}`);
       if (count < cap) {
-        // Strip either prefix to get the bare handle
-        const handle = env.name.replace(/^(?:invoker|keeper)\//, '');
+        const handle = env.name.replace(/^invoker\//, '');
         candidates.push({ handle, count });
       }
     }

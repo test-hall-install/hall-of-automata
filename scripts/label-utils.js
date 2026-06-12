@@ -83,7 +83,7 @@ const routing = async ({ github, core }) => {
     core.info('[label-utils] swapped hall:dispatch-automaton → hall:old-major');
   } else {
     await removeLabel('hall:old-major');
-    core.info(`[label-utils] removed hall:old-major (dispatching to ${agent})`);
+    core.info(`[label-utils] removed hall:old-major (dispatching to ${agent}; hall:${agent} preserved on issue)`);
   }
 };
 

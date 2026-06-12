@@ -142,7 +142,7 @@ jobs:
           REPO_OWNER:   ${{ needs.detect.outputs.repo-owner }}
           REPO_NAME:    ${{ needs.detect.outputs.repo-name }}
           PR_NUMBER:    ${{ needs.detect.outputs.pr-number }}
-          KEEPER:       ${{ steps.agent-cfg.outputs.keeper }}
+          invoker:      ${{ needs.select-invoker.outputs.invoker }}
           RETRY_COUNT:  ${{ steps.retry.outputs.count }}
           CI_FAILURES:  ${{ needs.detect.outputs.ci-failures }}
         uses: actions/github-script@v7
@@ -197,7 +197,6 @@ jobs:
         with:
           oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           app-token:   ${{ steps.app-token.outputs.token }}
-          max-turns:   ${{ steps.agent-cfg.outputs.max-turns }}
           prompt: >-
             CI checks have failed on PR #${{ needs.detect.outputs.pr-number }}
             in ${{ needs.detect.outputs.repo-owner }}/${{ needs.detect.outputs.repo-name }}.
@@ -244,7 +243,6 @@ jobs:
           invoker:            ${{ needs.select-invoker.outputs.invoker }}
           team-validated:     ${{ steps.agent-cfg.outputs.team-slug }}
           turns-used:         ${{ steps.agent.outputs.turns-used }}
-          turns-max:          ${{ steps.agent-cfg.outputs.max-turns }}
           retry-count:        ${{ steps.retry.outputs.new-count }}
           outcome:            ${{ steps.ci-outcome.outputs.outcome }}
           weekly-count-after: ${{ steps.increment.outputs.count }}
